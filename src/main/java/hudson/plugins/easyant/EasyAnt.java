@@ -6,21 +6,26 @@ import hudson.Extension;
 import hudson.FilePath;
 import hudson.Launcher;
 import hudson.Util;
+import hudson.model.BuildListener;
 import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
-import hudson.model.BuildListener;
+import hudson.model.Computer;
 import hudson.tasks.BuildStepDescriptor;
 import hudson.tasks.Builder;
+import hudson.tools.ToolInstallation;
 import hudson.util.ArgumentListBuilder;
-import hudson.util.FormValidation;
+import hudson.util.VariableResolver;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Properties;
+import java.util.Set;
 
 import net.sf.json.JSONObject;
 
 import org.kohsuke.stapler.DataBoundConstructor;
-import org.kohsuke.stapler.QueryParameter;
 import org.kohsuke.stapler.StaplerRequest;
 
 /**
@@ -30,176 +35,203 @@ import org.kohsuke.stapler.StaplerRequest;
  */
 public class EasyAnt extends Builder {
 
-	private final String name;
+    private final String easyAntName;
 
-	private final String targets;
+    private final String targets;
 
-	private final String buildFile;
+    private final String buildFile;
 
-	@DataBoundConstructor
-	public EasyAnt(String name, String targets, String buildFile) {
-		this.name = name;
-		this.targets = targets;
-		this.buildFile = buildFile;
-	}
+    /**
+     * EASYANT_OPTS if not null.
+     */
+    private final String easyAntOpts;
 
-	/**
-	 * We'll use this from the <tt>config.jelly</tt>.
-	 */
-	public String getName() {
-		return name;
-	}
+    /**
+     * Optional properties to be passed to EasyAnt. Follows {@link Properties}
+     * syntax.
+     */
+    private final String properties;
 
-	public String getTargets() {
-		return targets;
-	}
+    @DataBoundConstructor
+    public EasyAnt(String easyAntName, String targets, String buildFile,
+            String easyAntOpts, String properties) {
+        this.easyAntName = easyAntName;
+        this.targets = targets;
+        this.buildFile = Util.fixEmptyAndTrim(buildFile);
+        this.easyAntOpts = Util.fixEmptyAndTrim(easyAntOpts);
+        this.properties = Util.fixEmptyAndTrim(properties);
+    }
 
-	public String getBuildFile() {
-		return buildFile;
-	}
+    public String getEasyAntName() {
+        return easyAntName;
+    }
 
-	public EasyAntInstallation getEasyAnt() {
-		for (EasyAntInstallation i : DESCRIPTOR.getInstallations()) {
-			if (name != null && i.getName().equals(name))
-				return i;
-		}
-		return null;
+    public String getTargets() {
+        return targets;
+    }
 
-	}
+    public String getBuildFile() {
+        return buildFile;
+    }
 
-	@Override
-	public boolean perform(AbstractBuild<?, ?> build, Launcher launcher,
-			BuildListener listener) throws InterruptedException, IOException {
-		ArgumentListBuilder args = new ArgumentListBuilder();
+    public String getEasyAntOpts() {
+        return easyAntOpts;
+    }
 
-		String execName;
-		if (launcher.isUnix())
-			execName = "easyant";
-		else
-			execName = "easyant.bat";
+    public String getProperties() {
+        return properties;
+    }
 
-		String normalizedTargets = targets.replaceAll("[\t\r\n]+", " ");
+    public EasyAntInstallation getEasyAnt() {
+        for (EasyAntInstallation i : getDescriptor().getInstallations()) {
+            if (easyAntName != null && i.getName().equals(easyAntName))
+                return i;
+        }
+        return null;
 
-		EasyAntInstallation ai = getEasyAnt();
-		if (ai == null) {
-			args.add(execName);
-		} else {
-			File exec = ai.getExecutable();
-			if (!ai.isAvailable()) {
-				listener.fatalError(exec + " doesn't exist");
-				return false;
-			}
-			args.add(exec.getPath());
-		}
-		args.addKeyValuePairs("-D", build.getBuildVariables());
-		args.addTokenized(normalizedTargets);
-		EnvVars env = build.getEnvironment(listener);
-		if (ai != null)
-			env.put("EASYANT_HOME", ai.getEasyantHome());
+    }
 
-		if (!launcher.isUnix()) {
-			// on Windows, executing batch file can't return the correct error
-			// code,
-			// so we need to wrap it into cmd.exe.
-			// double %% is needed because we want ERRORLEVEL to be expanded
-			// after
-			// batch file executed, not before. This alone shows how broken
-			// Windows is...
-			args.prepend("cmd.exe", "/C");
-			args.add("&&", "exit", "%%ERRORLEVEL%%");
-		}
+    @Override
+    public boolean perform(AbstractBuild<?, ?> build, Launcher launcher,
+            BuildListener listener) throws InterruptedException, IOException {
+        ArgumentListBuilder args = new ArgumentListBuilder();
 
-		FilePath rootLauncher = null;
-		if (buildFile != null && buildFile.trim().length() != 0) {
-			String rootBuildScriptReal = Util.replaceMacro(buildFile, env);
-			rootLauncher = new FilePath(build.getModuleRoot(), new File(
-					rootBuildScriptReal).getParent());
-		} else {
-			rootLauncher = build.getModuleRoot();
-		}
+        EnvVars env = build.getEnvironment(listener);
+        // env.overrideAll(build.getBuildVariables());
 
-		try {
-			int r = launcher.launch().cmds(args).envs(env)
-					.stdout(listener).pwd(rootLauncher).join();
-			return r == 0;
-		} catch (IOException e) {
-			Util.displayIOException(e, listener);
-			e.printStackTrace(listener.fatalError("command execution failed"));
-			return false;
-		}
-	}
+        EasyAntInstallation ai = getEasyAnt();
+        if (ai == null) {
+            args.add(launcher.isUnix() ? EasyAntInstallation.UNIX_EASYANT_COMMAND
+                    : EasyAntInstallation.WINDOWS_EASYANT_COMMAND);
 
-	@Extension
-	public static final DescriptorImpl DESCRIPTOR = new DescriptorImpl();
+        } else {
+            ai = ai.forNode(Computer.currentComputer().getNode(), listener);
+            ai = ai.forEnvironment(env);
+            String exe;
+            exe = ai.getExecutable(launcher);
+            if (exe == null) {
+                listener.error("Can't retrieve the EasyAnt executable.");
+                return false;
+            }
+            args.add(exe);
+        }
 
-	public static final class DescriptorImpl extends
-			BuildStepDescriptor<Builder> {
+        VariableResolver<String> vr = new VariableResolver.ByMap<String>(env);
+        String buildFile = env.expand(this.buildFile);
+        String targets = env.expand(this.targets);
 
-		@CopyOnWrite
-		private volatile EasyAntInstallation[] installations = new EasyAntInstallation[0];
+        Set<String> sensitiveVars = build.getSensitiveBuildVariables();
 
-		public DescriptorImpl() {
-			load();
-		}
+        args.addKeyValuePairs("-D", build.getBuildVariables(), sensitiveVars);
 
-		public boolean isApplicable(Class<? extends AbstractProject> jobType) {
-			return true;
-		}
+        args.addKeyValuePairsFromPropertyString("-D", properties, vr,
+                sensitiveVars);
 
-		protected DescriptorImpl(Class<? extends EasyAnt> clazz) {
-			super(clazz);
-		}
+        args.addTokenized(targets.replaceAll("[\t\r\n]+", " "));
 
-		@Override
-		public String getHelpFile() {
-			return "/plugin/easyant/help.html";
-		}
+        if (ai != null) {
+            env.put("EASYANT_HOME", ai.getHome());
+        }
+        if (easyAntOpts != null)
+            env.put("EASYANT_OPTS", env.expand(easyAntOpts));
 
-		public String getDisplayName() {
-			return Messages.EasyAnt_DisplayName();
-		}
+        if (!launcher.isUnix()) {
+            args = args.toWindowsCommand();
+            // For some reason, ant on windows rejects empty parameters but unix
+            // does not.
+            // Add quotes for any empty parameter values:
+            List<String> newArgs = new ArrayList<String>(args.toList());
+            newArgs.set(newArgs.size() - 1, newArgs.get(newArgs.size() - 1)
+                    .replaceAll("(?<= )(-D[^\" ]+)= ", "$1=\"\" "));
+            args = new ArgumentListBuilder(newArgs.toArray(new String[newArgs
+                    .size()]));
+        }
 
-		public EasyAntInstallation[] getInstallations() {
-			return installations;
-		}
+        FilePath rootLauncher = null;
+        if (buildFile != null && buildFile.trim().length() != 0) {
+            String rootBuildScriptReal = Util.replaceMacro(buildFile, env);
+            rootLauncher = new FilePath(build.getModuleRoot(), new File(
+                    rootBuildScriptReal).getParent());
+        } else {
+            rootLauncher = build.getModuleRoot();
+        }
 
-		@Override
-		public boolean configure(StaplerRequest req, JSONObject json)
-				throws FormException {
-			installations = req.bindJSONToList(EasyAntInstallation.class,
-					json.get("inst")).toArray(new EasyAntInstallation[0]);
-			save();
-			return true;
-		}
+        try {
+            int r = launcher.launch().cmds(args).envs(env).stdout(listener)
+                    .pwd(rootLauncher).join();
+            return r == 0;
+        } catch (IOException e) {
+            Util.displayIOException(e, listener);
+            e.printStackTrace(listener.fatalError("command execution failed"));
+            return false;
+        }
+    }
 
-		@Override
-		public EasyAnt newInstance(StaplerRequest req, JSONObject formData)
-				throws FormException {
-			return (EasyAnt) req.bindJSON(clazz, formData);
-		}
+    @Override
+    public DescriptorImpl getDescriptor() {
+        return (DescriptorImpl) super.getDescriptor();
+    }
 
-		/**
-		 * Checks if the specified Hudson EASYANT_HOME is valid.
-		 */
-		public FormValidation doCheckEasyAntHome(@QueryParameter String value) {
-			File f = new File(Util.fixNull(value));
+    @Extension
+    public static final class DescriptorImpl extends
+            BuildStepDescriptor<Builder> {
 
-			if (!f.isDirectory()) {
-				return FormValidation.error(f + " is not a directory");
-			}
+        @CopyOnWrite
+        private volatile EasyAntInstallation[] installations = new EasyAntInstallation[0];
 
-			if (!new File(f, "bin").exists()
-					&& !new File(f, "lib").exists()) {
-				return FormValidation.error(f + " doesn't look like an EasyAnt directory");
-			}
+        public DescriptorImpl() {
+            load();
+        }
 
-			if (!new File(f, "bin/easyant").exists()) {
-				return FormValidation.error(f + " doesn't look like an EasyAnt directory");
-			}
+        public boolean isApplicable(Class<? extends AbstractProject> jobType) {
+            return true;
+        }
 
-			return FormValidation.ok();
-		}
+        protected DescriptorImpl(Class<? extends EasyAnt> clazz) {
+            super(clazz);
+        }
 
-	}
+        /**
+         * Obtains the {@link EasyantInstallation.DescriptorImpl} instance.
+         */
+        public EasyAntInstallation.DescriptorImpl getToolDescriptor() {
+            return ToolInstallation.all().get(
+                    EasyAntInstallation.DescriptorImpl.class);
+        }
+
+        @Override
+        public String getHelpFile() {
+            return "/plugin/easyant/help.html";
+        }
+
+        public String getDisplayName() {
+            return Messages.EasyAnt_DisplayName();
+        }
+
+        public EasyAntInstallation[] getInstallations() {
+            return installations;
+        }
+
+        public void setInstallations(EasyAntInstallation... installations) {
+            this.installations = installations;
+            save();
+        }
+
+        @Override
+        public boolean configure(StaplerRequest req, JSONObject json)
+                throws FormException {
+            installations = req.bindJSONToList(EasyAntInstallation.class,
+                    json.get("inst")).toArray(new EasyAntInstallation[0]);
+            save();
+            return true;
+        }
+
+        @Override
+        public EasyAnt newInstance(StaplerRequest req, JSONObject formData)
+                throws FormException {
+            return (EasyAnt) req.bindJSON(clazz, formData);
+        }
+
+    }
 
 }
