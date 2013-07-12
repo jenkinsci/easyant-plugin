@@ -39,6 +39,8 @@ public class EasyAnt extends Builder {
 
     private final String targets;
 
+    private final String buildModule;
+
     private final String buildFile;
 
     /**
@@ -53,10 +55,11 @@ public class EasyAnt extends Builder {
     private final String properties;
 
     @DataBoundConstructor
-    public EasyAnt(String easyAntName, String targets, String buildFile,
-            String easyAntOpts, String properties) {
+    public EasyAnt(String easyAntName, String targets, String buildModule,
+            String buildFile, String easyAntOpts, String properties) {
         this.easyAntName = easyAntName;
         this.targets = targets;
+        this.buildModule = Util.fixEmptyAndTrim(buildModule);
         this.buildFile = Util.fixEmptyAndTrim(buildFile);
         this.easyAntOpts = Util.fixEmptyAndTrim(easyAntOpts);
         this.properties = Util.fixEmptyAndTrim(properties);
@@ -80,6 +83,10 @@ public class EasyAnt extends Builder {
 
     public String getProperties() {
         return properties;
+    }
+
+    public String getBuildModule() {
+        return buildModule;
     }
 
     public EasyAntInstallation getEasyAnt() {
@@ -117,8 +124,26 @@ public class EasyAnt extends Builder {
         }
 
         VariableResolver<String> vr = new VariableResolver.ByMap<String>(env);
+        String buildModule = env.expand(this.buildModule);
         String buildFile = env.expand(this.buildFile);
         String targets = env.expand(this.targets);
+
+        if (buildModule != null) {
+            FilePath buildModulePath = buildFilePath(build, listener,
+                    buildModule);
+            if (buildModulePath == null) {
+                return false;
+            }
+            args.add("-buildModule", buildModulePath.getName());
+        }
+
+        if (buildFile != null) {
+            FilePath buildFilePath = buildFilePath(build, listener, buildFile);
+            if (buildFilePath == null) {
+                return false;
+            }
+            args.add("-buildFile", buildFilePath.getName());
+        }
 
         Set<String> sensitiveVars = build.getSensitiveBuildVariables();
 
@@ -165,6 +190,39 @@ public class EasyAnt extends Builder {
             e.printStackTrace(listener.fatalError("command execution failed"));
             return false;
         }
+    }
+
+    private FilePath buildFilePath(AbstractBuild<?, ?> build,
+            BuildListener listener, String file) throws IOException,
+            InterruptedException {
+        FilePath filepath = build.getModuleRoot().child(file);
+        if (filepath.exists()) {
+            return filepath;
+        } else {
+            // because of the poor choice of getModuleRoot() with
+            // CVS/Subversion, people often get confused
+            // with where the build file path is relative to. Now it's too late
+            // to change this behavior
+            // due to compatibility issue, but at least we can make this less
+            // painful by looking for errors
+            // and diagnosing it nicely. See HUDSON-1782
+
+            // first check if this appears to be a valid relative path from
+            // workspace root
+            FilePath buildFilePath2 = build.getWorkspace().child(file);
+            if (buildFilePath2.exists()) {
+                // This must be what the user meant. Let it continue.
+                return buildFilePath2;
+            } else {
+                // neither file exists. So this now really does look like an
+                // error.
+
+                listener.fatalError("Unable to find build module or build script at "
+                        + filepath);
+                return null;
+            }
+        }
+
     }
 
     @Override

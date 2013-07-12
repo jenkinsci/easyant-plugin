@@ -17,6 +17,9 @@ f.entry(title:_("Targets"),field:"targets") {
 }
 
 f.advanced {
+    f.entry(title:_("Build Module"),field:"buildModule") {
+        f.expandableTextbox()
+    }
     f.entry(title:_("Build File"),field:"buildFile") {
         f.expandableTextbox()
     }
