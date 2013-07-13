@@ -181,15 +181,35 @@ public class EasyAnt extends Builder {
             rootLauncher = build.getModuleRoot();
         }
 
+        long startTime = System.currentTimeMillis();
         try {
-            int r = launcher.launch().cmds(args).envs(env).stdout(listener)
-                    .pwd(rootLauncher).join();
+            EasyAntConsoleAnnotator eaca = new EasyAntConsoleAnnotator(
+                    listener.getLogger(), build.getCharset());
+            int r;
+            try {
+                r = launcher.launch().cmds(args).envs(env).stdout(eaca)
+                        .pwd(rootLauncher).join();
+            } finally {
+                eaca.forceEol();
+            }
             return r == 0;
         } catch (IOException e) {
             Util.displayIOException(e, listener);
-            e.printStackTrace(listener.fatalError("command execution failed"));
+
+            String errorMessage = Messages.EasyAnt_ExecFailed();
+            if (ai == null && (System.currentTimeMillis() - startTime) < 1000) {
+                if (getDescriptor().getInstallations() == null)
+                    // looks like the user didn't configure any Ant installation
+                    errorMessage += Messages.EasyAnt_GlobalConfigNeeded();
+                else
+                    // There are Ant installations configured but the project
+                    // didn't pick it
+                    errorMessage += Messages.EasyAnt_ProjectConfigNeeded();
+            }
+            e.printStackTrace(listener.fatalError(errorMessage));
             return false;
         }
+
     }
 
     private FilePath buildFilePath(AbstractBuild<?, ?> build,
